@@ -1,0 +1,439 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext, simpledialog
+import json
+import os
+from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
+import time
+import threading
+
+
+# Variables globales
+EQUIPOS_FILE = "equipos.json"
+USERS_FILE = "users.json"
+ventana_puertos = None
+connection = None
+unidad_seleccionada = None
+# Cargar usuarios del archivo
+if os.path.exists(USERS_FILE):
+    with open(USERS_FILE, 'r') as file:
+        users = json.load(file)
+else:
+    users = {}
+
+# Obtener la ruta del directorio donde se ejecuta el script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Definir las rutas de los archivos
+EQUIPOS_FILE = os.path.join(script_dir, "equipos.json")
+USERS_FILE = os.path.join(script_dir, "users.json")
+
+
+def conectar_en_hilo():
+    thread = threading.Thread(target=conectar)
+    thread.start()
+
+def cargar_registro_equipos():
+    """Carga el registro de equipos desde un archivo JSON."""
+    if os.path.exists(EQUIPOS_FILE):
+        with open(EQUIPOS_FILE, 'r') as file:
+            return json.load(file)
+    else:
+        return {}
+
+def guardar_registro_equipos(registro):
+    """Guarda el registro de equipos en un archivo JSON."""
+    with open(EQUIPOS_FILE, 'w') as file:
+        json.dump(registro, file)
+
+def conectar():
+    global connection, unidad_seleccionada, ventana_puertos
+    if connection:
+        connection.disconnect()
+        connection = None
+    if ventana_puertos:
+        ventana_puertos.destroy()
+        ventana_puertos = None
+
+    ip = entry_ip.get()
+    user = combo_users.get()
+    password = entry_password.get()
+
+    if not ip or not user or not password:
+        messagebox.showwarning("Advertencia", "Por favor, llena todos los campos.")
+        return
+
+    device = {
+        'device_type': 'cisco_ios',
+        'ip': ip,
+        'username': user,
+        'password': password,
+        'conn_timeout': 10,
+    }
+
+    output.insert(tk.END, "Intentando conectar, por favor espere...\n")
+    for intento in range(3):  # Intenta conectar hasta 3 veces
+        try:
+            connection = ConnectHandler(**device)
+            if connection.is_alive():
+                output.insert(tk.END, f"Conectado exitosamente a {ip}\n")
+                # Verificar si es una pila
+                config = connection.send_command("show running-config | include switch [0-9] provision")
+                es_pila = len(config.splitlines()) > 1
+                if es_pila:
+                    unidad_seleccionada = simpledialog.askinteger("Selección de Unidad", 
+                                                                  "Ingresa el número de la unidad (1-5):", 
+                                                                  minvalue=1, maxvalue=5)
+                else:
+                    unidad_seleccionada = None
+
+                mostrar_puertos()
+                break
+            else:
+                output.insert(tk.END, "Conexión no establecida, reintentando...\n")
+        except NetmikoTimeoutException:
+            output.insert(tk.END, "Tiempo de espera excedido, reintentando...\n")
+        except NetmikoAuthenticationException:
+            output.insert(tk.END, "Error de autenticación. Verifica usuario y contraseña.\n")
+            break
+        except Exception as e:
+            output.insert(tk.END, f"Error al conectar: {e}\n")
+        time.sleep(1)
+
+    if intento == 2:
+        output.insert(tk.END, "No se pudo establecer la conexión después de varios intentos.\n")
+
+
+
+def actualizar_password(event):
+    """Actualiza el campo de contraseña basado en el usuario seleccionado"""
+    user = combo_users.get()
+    if user in users:
+        entry_password.delete(0, tk.END)
+        entry_password.insert(0, users[user])     
+
+def agregar_usuario():
+    global users  # Es importante referenciar la variable global
+
+    user = combo_users.get()
+    password = entry_password.get()
+
+    if user and password:
+        # Guardar en el archivo de usuarios
+        users[user] = password  # Actualizamos el diccionario en memoria
+        with open(USERS_FILE, 'w') as file:
+            json.dump(users, file)  # Y luego guardamos ese diccionario en el archivo
+
+        combo_users['values'] = list(users.keys())
+        output.insert(tk.END, f"Usuario {user} agregado exitosamente\n")
+    else:
+        messagebox.showwarning("Advertencia", "Por favor, ingresa un usuario y contraseña")
+
+def mostrar_puertos():
+    global ventana_puertos, connection, unidad_seleccionada
+    if ventana_puertos:
+        ventana_puertos.lift()
+        return
+
+    if connection:
+        puertos = obtener_puertos()
+        ventana_puertos = tk.Toplevel()
+        ventana_puertos.title("Seleccionar Puertos")
+        ventana_puertos.geometry("450x700")
+
+        container = ttk.Frame(ventana_puertos)
+        container.pack(fill="both", expand=True)
+
+        x = app.winfo_x() + app.winfo_width()
+        y = app.winfo_y()
+        ventana_puertos.geometry(f"+{x}+{y}")
+
+        canvas = tk.Canvas(container)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        estados_puertos = {}
+        for i, puerto in enumerate(puertos):
+            config_puerto = connection.send_command(f"show running-config interface {puerto}")
+            es_trunk = 'switchport mode trunk' in config_puerto
+            estado_puerto = tk.BooleanVar()
+            puerto_text = f"{puerto} - {'Troncal' if es_trunk else 'Acceso'}"
+
+            max_security_line = next((line for line in config_puerto.split("\n") if "switchport port-security maximum" in line), None)
+            if max_security_line:
+                max_security_value = max_security_line.split()[-1]
+                puerto_text += f" - Max Security: {max_security_value}"
+
+            checkbox = tk.Checkbutton(scrollable_frame, text=puerto_text, variable=estado_puerto, state='disabled' if es_trunk else 'normal')
+            checkbox.grid(row=i, column=0, sticky="w")
+            estados_puertos[puerto] = estado_puerto
+
+        btn_frame = ttk.Frame(ventana_puertos)
+        btn_frame.pack(fill="x", expand=True)
+
+        btn_ver_config = ttk.Button(btn_frame, text="Ver Configuración", 
+                                    command=lambda: ver_configuracion_puerto(estados_puertos))
+        btn_ver_config.pack(side="left", padx=10, pady=10)
+
+        btn_aplicar_seguridad = ttk.Button(btn_frame, text="Aplicar Configuración de Seguridad", 
+                                           command=lambda: aplicar_configuracion(estados_puertos))
+        btn_aplicar_seguridad.pack(side="left", padx=10, pady=10)
+
+        btn_reiniciar = ttk.Button(btn_frame, text="Reiniciar Puerto", 
+                                   command=lambda: reiniciar_puerto(estados_puertos))
+        btn_reiniciar.pack(side="left", padx=10, pady=10)
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+
+       
+def seleccionar_unidad():
+    """Permite al usuario seleccionar una unidad (switch) en la pila."""
+    global unidad_seleccionada
+    es_pila = messagebox.askyesno("Pregunta", "¿Estás conectando a una pila de switches?")
+    if es_pila:
+        unidad_seleccionada = simpledialog.askinteger("Selección de Unidad", 
+                                                      "Ingresa el número de la unidad (1-5):", 
+                                                      minvalue=1, maxvalue=5)
+    else:
+        unidad_seleccionada = None
+    if unidad_seleccionada is not None or not es_pila:
+        mostrar_puertos()
+
+def obtener_puertos():
+    """Obtiene los puertos del switch seleccionado."""
+    if connection:
+        comando = "show ip interface brief"
+        if unidad_seleccionada:
+            # Modifica el comando para obtener puertos de una unidad específica en la pila
+            comando += f" | include GigabitEthernet{unidad_seleccionada}/"
+        salida = connection.send_command(comando)
+
+        puertos = []
+        for linea in salida.splitlines():
+            partes = linea.split()
+            if len(partes) >= 2 and "Interface" not in partes[0] and "Vlan1" not in partes[0] and "FastEthernet0" not in partes[0]:
+                # Filtra según la unidad seleccionada en caso de pila
+                if unidad_seleccionada and f"GigabitEthernet{unidad_seleccionada}/" in partes[0]:
+                    puertos.append(partes[0])
+                elif not unidad_seleccionada:
+                    puertos.append(partes[0])
+        return puertos
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+        return []
+
+def ver_configuracion_puerto(estados_puertos):
+    for puerto, estado in estados_puertos.items():
+        if estado.get():  # Si el checkbox está seleccionado
+            # Obtener la configuración actual del puerto
+            config_puerto = connection.send_command(f"show running-config interface {puerto}")
+            output.insert(tk.END, f"Configuración de {puerto}:\n{config_puerto}\n")
+
+            # Obtener y mostrar el estado actual del puerto (up/down)
+            estado_puerto_respuesta = connection.send_command(f"show interface {puerto}")
+            if "line protocol is up" in estado_puerto_respuesta.lower():
+                estado_linea = "Up"
+            elif "line protocol is down" in estado_puerto_respuesta.lower():
+                estado_linea = "Down"
+            else:
+                estado_linea = "Indeterminado"
+
+            label_estado_puerto.config(text=f"Estado del Puerto: {estado_linea}")
+
+            # Verificar si la seguridad del puerto está habilitada
+            if "switchport port-security" in config_puerto:
+                label_seguridad_puerto.config(text="Seguridad del Puerto: Habilitada")
+            else:
+                label_seguridad_puerto.config(text="Seguridad del Puerto: Deshabilitada")
+
+def aplicar_configuracion(estados_puertos):
+    global connection
+    if connection:
+        puerto_seleccionado = None
+        for puerto, estado in estados_puertos.items():
+            if estado.get():
+                puerto_seleccionado = puerto
+                break
+
+        if puerto_seleccionado:
+            ventana_seguridad = tk.Toplevel()
+            ventana_seguridad.title(f"Configurar Seguridad - {puerto_seleccionado}")
+
+            # Checkbox para decidir si aplicar switchport port-security maximum
+            aplicar_max_security = tk.BooleanVar()
+            check_max_security = tk.Checkbutton(ventana_seguridad, text="Aplicar switchport port-security maximum", variable=aplicar_max_security)
+            check_max_security.pack(padx=10, pady=5)
+
+            # Campo de entrada para especificar el valor máximo
+            entry_max_security = tk.Entry(ventana_seguridad)
+            entry_max_security.pack(padx=10, pady=5)
+
+            # Botón para habilitar la seguridad en el puerto seleccionado
+            btn_habilitar = tk.Button(ventana_seguridad, text="Habilitar", 
+                                      command=lambda: configurar_seguridad_puerto(puerto_seleccionado, True, aplicar_max_security.get(), entry_max_security.get()))
+            btn_habilitar.pack(padx=10, pady=5)
+
+            # Botón para deshabilitar la seguridad en el puerto seleccionado
+            btn_deshabilitar = tk.Button(ventana_seguridad, text="Deshabilitar", 
+                                         command=lambda: configurar_seguridad_puerto(puerto_seleccionado, False))
+            btn_deshabilitar.pack(padx=10, pady=5)
+
+            # Ajustar el tamaño de la ventana para una mejor visualización
+            ventana_seguridad.geometry("400x150")
+            
+            # Centrar la ventana de configuración de seguridad
+            centrar_ventana(ventana_seguridad, app)
+        else:
+            output.insert(tk.END, "Por favor, selecciona un puerto primero.\n")
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+   
+def centrar_ventana(ventana, ventana_padre):
+    """ Centra la ventana dada respecto a la ventana padre. """
+    ventana.update_idletasks()
+    width = ventana.winfo_width()
+    height = ventana.winfo_height()
+    x = ventana_padre.winfo_x() + (ventana_padre.winfo_width() // 2) - (width // 2)
+    y = ventana_padre.winfo_y() + (ventana_padre.winfo_height() // 2) - (height // 2)
+    ventana.geometry('+{}+{}'.format(x, y))
+
+def configurar_seguridad_puerto(puerto, habilitar, aplicar_max_security=False, max_security_value=None):
+    global connection
+
+    if connection:
+        if habilitar:
+            # Comandos estándar para habilitar la seguridad
+            comandos = [
+                f"interface {puerto}",
+                "switchport port-security",
+                "switchport port-security mac-address sticky",
+            ]
+
+            if aplicar_max_security and max_security_value:
+                comandos.append(f"switchport port-security maximum {max_security_value}")
+
+            comandos.extend(["shut", "no shut", "end"])
+            connection.send_config_set(comandos)
+            output.insert(tk.END, f"Seguridad habilitada en {puerto}\n")
+        else:
+            # Comandos para deshabilitar la seguridad
+            comandos = [
+                f"interface {puerto}",
+                "no switchport port-security",
+                "no switchport port-security mac-address sticky",
+                "no switchport port-security maximum",
+                "shut",
+                "no shut",
+                "end"
+            ]
+            connection.send_config_set(comandos)
+            output.insert(tk.END, f"Seguridad deshabilitada en {puerto}\n")
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+
+def reiniciar_puerto(estados_puertos):
+    if connection:
+        for puerto, estado in estados_puertos.items():
+            if estado.get():
+                # Enviar comandos para reiniciar el puerto
+                comandos = [f"interface {puerto}", "shutdown", "no shutdown", "end"]
+                connection.send_config_set(comandos)
+
+                # Esperar un poco para que el puerto tenga tiempo de cambiar de estado
+                time.sleep(5)
+
+                # Comprobar el estado del puerto después del reinicio
+                estado_puerto_respuesta = connection.send_command(f"show interface {puerto}")
+                if "line protocol is up" in estado_puerto_respuesta.lower():
+                    output.insert(tk.END, f"Estado de {puerto} después del reinicio: Up\n")
+                elif "line protocol is down" in estado_puerto_respuesta.lower():
+                    output.insert(tk.END, f"Estado de {puerto} después del reinicio: Down\n")
+                else:
+                    output.insert(tk.END, f"Estado de {puerto} después del reinicio: Indeterminado\n")
+                break
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+
+def conectar_con_enter(event):
+    conectar()
+
+class AutoScrollingScrolledText(scrolledtext.ScrolledText):
+    def insert(self, index, text):
+        super().insert(index, text)
+        self.see(tk.END)  # Desplazarse automáticamente hacia abajo
+
+
+app = tk.Tk()
+app.title("Puerto de Seguridad by Jose Roberto Medina")
+app.geometry("1000x700")  # Definir un tamaño inicial más grande
+app.grid_rowconfigure(2, weight=1)  # Hacer que la fila 2 (output) se expanda
+app.grid_columnconfigure(0, weight=1)  # Hacer que la columna 0 se expanda
+
+frame = ttk.LabelFrame(app, text="Conexión")
+frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew", columnspan=2)
+
+label_ip = ttk.Label(frame, text="IP:")
+label_ip.grid(row=0, column=0, sticky="w")
+entry_ip = ttk.Entry(frame)
+entry_ip.grid(row=0, column=1, sticky="ew")
+
+label_user = ttk.Label(frame, text="Usuario:")
+label_user.grid(row=1, column=0, sticky="w")
+combo_users = ttk.Combobox(frame, values=list(users.keys()))
+combo_users.grid(row=1, column=1, sticky="ew")
+# combo_users.set("Otro")
+combo_users.bind("<<ComboboxSelected>>", actualizar_password)
+
+label_password = ttk.Label(frame, text="Contraseña:")
+label_password.grid(row=2, column=0, sticky="w")
+entry_password = ttk.Entry(frame, show="*")
+entry_password.grid(row=2, column=1, sticky="ew")
+
+btn_conectar = ttk.Button(frame, text="Conectar", command=conectar_en_hilo)
+btn_conectar.grid(row=3, column=1, pady=10, sticky="ew")
+app.bind('<Return>', conectar_con_enter)
+
+# Después de definir tus elementos de entrada en el frame principal
+label_estado_puerto = ttk.Label(frame, text="Estado del Puerto: -")
+label_estado_puerto.grid(row=4, column=0, columnspan=2, sticky="w")
+
+label_seguridad_puerto = ttk.Label(frame, text="Seguridad del Puerto: -")
+label_seguridad_puerto.grid(row=5, column=0, columnspan=2, sticky="w")
+
+# Luego, crea el objeto output con esta nueva clase
+output = AutoScrollingScrolledText(app, wrap=tk.WORD, width=80, height=30, bg='black', fg='#00FF00')
+output.grid(row=2, column=0, padx=10, pady=10, sticky="nsew", columnspan=2)
+
+# Agrega un botón para seleccionar la unidad
+btn_seleccionar_unidad = ttk.Button(frame, text="Seleccionar Unidad", command=seleccionar_unidad)
+btn_seleccionar_unidad.grid(row=6, column=0, columnspan=2, pady=10, sticky="ew")
+
+
+logo_seguridad_ascii = """
+███████╗███████╗ ██████╗ ██╗   ██╗██████╗ ██╗██████╗  █████╗ ██████╗ 
+██╔════╝██╔════╝██╔════╝ ██║   ██║██╔══██╗██║██╔══██╗██╔══██╗██╔══██╗
+███████╗█████╗  ██║  ███╗██║   ██║██████╔╝██║██║  ██║███████║██║  ██║
+╚════██║██╔══╝  ██║   ██║██║   ██║██╔══██╗██║██║  ██║██╔══██║██║  ██║
+███████║███████╗╚██████╔╝╚██████╔╝██║  ██║██║██████╔╝██║  ██║██████╔╝
+╚══════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝ ╚═╝  ╚═╝╚═════╝                                                                    
+Bienvenido al Sistema de Configuración de Puertos de Seguridad
+"""
+
+# En tu código, después de crear el área de texto output:
+output.insert(tk.END, logo_seguridad_ascii)
+
+
+
+app.mainloop()
