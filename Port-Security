@@ -102,8 +102,6 @@ def conectar():
     if intento == 2:
         output.insert(tk.END, "No se pudo establecer la conexión después de varios intentos.\n")
 
-
-
 def actualizar_password(event):
     """Actualiza el campo de contraseña basado en el usuario seleccionado"""
     user = combo_users.get()
@@ -196,7 +194,6 @@ def mostrar_puertos():
         btn_reiniciar.pack(side="left", padx=10, pady=10)
     else:
         output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
-
        
 def seleccionar_unidad():
     """Permite al usuario seleccionar una unidad (switch) en la pila."""
@@ -212,27 +209,31 @@ def seleccionar_unidad():
         mostrar_puertos()
 
 def obtener_puertos():
-    """Obtiene los puertos del switch seleccionado."""
+    """Obtiene los puertos del switch seleccionado de manera eficiente."""
     if connection:
+        # Comando para obtener la información de todos los puertos a la vez
         comando = "show ip interface brief"
-        if unidad_seleccionada:
-            # Modifica el comando para obtener puertos de una unidad específica en la pila
-            comando += f" | include GigabitEthernet{unidad_seleccionada}/"
         salida = connection.send_command(comando)
 
         puertos = []
+        # Procesar la salida para extraer los nombres de los puertos
         for linea in salida.splitlines():
             partes = linea.split()
-            if len(partes) >= 2 and "Interface" not in partes[0] and "Vlan1" not in partes[0] and "FastEthernet0" not in partes[0]:
-                # Filtra según la unidad seleccionada en caso de pila
-                if unidad_seleccionada and f"GigabitEthernet{unidad_seleccionada}/" in partes[0]:
-                    puertos.append(partes[0])
-                elif not unidad_seleccionada:
-                    puertos.append(partes[0])
+            if len(partes) >= 2 and partes[0] not in ("Interface", "Vlan1"):
+                # Excluir específicamente FastEthernet0 pero incluir otros FastEthernet y GigabitEthernet
+                if partes[0] != "FastEthernet0" and ("FastEthernet" in partes[0] or "GigabitEthernet" in partes[0]):
+                    # Filtra según la unidad seleccionada en caso de pila
+                    if not unidad_seleccionada or f"{partes[0]}".startswith(f"FastEthernet{unidad_seleccionada}/") or f"{partes[0]}".startswith(f"GigabitEthernet{unidad_seleccionada}/"):
+                        puertos.append(partes[0])
         return puertos
     else:
         output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
         return []
+
+
+
+
+
 
 def ver_configuracion_puerto(estados_puertos):
     for puerto, estado in estados_puertos.items():
