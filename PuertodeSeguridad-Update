@@ -141,6 +141,7 @@ def analizar_configuracion_para_troncales(configuracion):
         elif 'switchport mode trunk' in linea and nombre_puerto_actual:
             puertos_troncales.append(nombre_puerto_actual)
             nombre_puerto_actual = None  # Reset para el siguiente puerto
+            print("Puertos troncales encontrados:", puertos_troncales)
     return puertos_troncales
 
 def actualizar_password(event):
@@ -329,6 +330,7 @@ def ver_configuracion_puerto(estados_puertos):
         if estado.get():  # Si el checkbox está seleccionado
             # Obtener la configuración actual del puerto
             config_puerto = connection.send_command(f"show running-config interface {puerto}")
+            print(f"Configuración de {puerto}:\n{config_puerto}\n")  # Imprimir configuración del puerto
             output.insert(tk.END, f"Configuración de {puerto}:\n{config_puerto}\n")
 
             # Obtener y mostrar el estado actual del puerto (up/down)
@@ -340,13 +342,17 @@ def ver_configuracion_puerto(estados_puertos):
             else:
                 estado_linea = "Indeterminado"
 
+            print(f"Estado del Puerto {puerto}: {estado_linea}")  # Imprimir estado del puerto
             label_estado_puerto.config(text=f"Estado del Puerto: {estado_linea}")
 
             # Verificar si la seguridad del puerto está habilitada
             if "switchport port-security" in config_puerto:
                 label_seguridad_puerto.config(text="Seguridad del Puerto: Habilitada")
+                print("Seguridad del Puerto: Habilitada")  # Imprimir estado de seguridad del puerto
             else:
                 label_seguridad_puerto.config(text="Seguridad del Puerto: Deshabilitada")
+                print("Seguridad del Puerto: Deshabilitada")  # Imprimir estado de seguridad del puerto
+
 
 def aplicar_configuracion(estados_puertos):
     print("Aplicando configuración...")
@@ -415,7 +421,7 @@ def configurar_seguridad_puertos(puertos, habilitar, aplicar_max_security=False,
                     "end",
                     "wr"
                 ]
-
+            print(f"Aplicando configuración en {puerto}:\n" + "\n".join(comandos))
             connection.send_config_set(comandos)
             output.insert(tk.END, f"Configuración aplicada en {puerto}\n")
     else:
@@ -446,6 +452,8 @@ def reiniciar_puerto(estados_puertos):
 
 def conectar_con_enter(event):
     conectar()
+
+# Buscardor de MAC en los puertos y sus vecionos
 
 def normalizar_mac(mac_address):
     # Elimina todos los separadores no deseados y convierte a minúsculas
@@ -537,8 +545,6 @@ def mostrar_ventana_buscar_mac():
     return ventana_buscar_mac
   
 
-
-
 # Configuracion de VLAN
 
 
@@ -556,7 +562,6 @@ def mostrar_vlans():
         except Exception as e:
             print(f"Error al obtener las VLANs: {e}")  # Mensaje de error en caso de excepción
 
-
 def formatear_salida_vlans(vlans_output):
     # Aquí puedes agregar el código para formatear la salida de manera que sea más legible
     # Esto dependerá del formato exacto de la salida de tu comando
@@ -571,10 +576,6 @@ def formatear_salida_vlans(vlans_output):
         linea_formateada = ' '.join(partes)
         lineas_formateadas.append(linea_formateada)
     return '\n'.join(lineas_formateadas)
-
-
-
-
 
 def cambiar_vlan_puerto():
     global puerto_seleccionado, connection
@@ -614,9 +615,6 @@ def cambiar_vlan_puerto():
     else:
         messagebox.showwarning("Advertencia", "Por favor, selecciona un puerto y conéctate a un dispositivo.")
         print(f"Advertencia: Puerto no seleccionado o conexión no establecida.")
-
-
-
 
 # Esta función debería ser llamada cada vez que un puerto es seleccionado o deseleccionado
 def actualizar_puerto_seleccionado(puerto, es_seleccionado):
