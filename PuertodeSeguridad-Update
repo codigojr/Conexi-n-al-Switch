@@ -1,0 +1,759 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext, simpledialog
+import json
+import os
+from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
+import time
+import threading
+import logging
+import re
+
+logging.basicConfig(filename='netmiko.log', level=logging.DEBUG)
+logger = logging.getLogger("netmiko")
+
+# Variables globales
+EQUIPOS_FILE = "equipos.json"
+USERS_FILE = "users.json"
+ventana_puertos = None
+connection = None
+unidad_seleccionada = None
+puerto_seleccionado = None
+
+# Cargar usuarios del archivo
+if os.path.exists(USERS_FILE):
+    with open(USERS_FILE, 'r') as file:
+        users = json.load(file)
+else:
+    users = {}
+
+# Obtener la ruta del directorio donde se ejecuta el script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Definir las rutas de los archivos
+EQUIPOS_FILE = os.path.join(script_dir, "equipos.json")
+USERS_FILE = os.path.join(script_dir, "users.json")
+
+
+
+def conectar_en_hilo():
+    thread = threading.Thread(target=conectar)
+    thread.start()
+
+def cargar_registro_equipos():
+    """Carga el registro de equipos desde un archivo JSON."""
+    if os.path.exists(EQUIPOS_FILE):
+        with open(EQUIPOS_FILE, 'r') as file:
+            return json.load(file)
+    else:
+        return {}
+
+def guardar_registro_equipos(registro):
+    """Guarda el registro de equipos en un archivo JSON."""
+    with open(EQUIPOS_FILE, 'w') as file:
+        json.dump(registro, file)
+
+def conectar():
+    global connection, unidad_seleccionada, ventana_puertos, puertos_troncales
+    if connection:
+        connection.disconnect()
+        connection = None
+
+    output.delete('1.0', tk.END)
+    output.insert(tk.END, logo_seguridad_ascii) 
+    
+
+
+    # Cierra la ventana de puertos si está abierta y establece ventana_puertos a None
+    if ventana_puertos:
+        ventana_puertos.destroy()
+        ventana_puertos = None
+
+    ip = entry_ip.get()
+    user = combo_users.get()
+    password = entry_password.get()
+
+    if not ip or not user or not password:
+        messagebox.showwarning("Advertencia", "Por favor, llena todos los campos.")
+        return
+
+    device = {
+    'device_type': 'cisco_ios',
+    'ip': ip,
+    'username': user,
+    'password': password,
+    'conn_timeout': 20,  # Aumenta el tiempo de conexión
+    'global_delay_factor': 4  # Aumenta si el dispositivo es lento en responder
+}
+
+
+
+
+    output.insert(tk.END, "Intentando conectar, por favor espere...\n")
+    print("Iniciando proceso de conexión...")
+    for intento in range(3):  # Intenta conectar hasta 3 veces
+        try:
+            connection = ConnectHandler(**device)
+            if connection.is_alive():
+                output.insert(tk.END, f"Conectado exitosamente a {ip}\n")
+                print(f"Conexión exitosa a {ip}")
+
+                # Llamar a mostrar_vlans aquí para cargar y mostrar la información de VLANs
+                mostrar_vlans()
+
+
+                # Verificar si es una pila
+                config = connection.send_command("show running-config | include switch [0-9] provision")
+                es_pila = len(config.splitlines()) > 1
+                if es_pila:
+                    unidad_seleccionada = simpledialog.askinteger("Selección de Unidad", 
+                                                                  "Ingresa el número de la unidad (1-5):", 
+                                                                  minvalue=1, maxvalue=5)
+                else:
+                    unidad_seleccionada = None
+
+                # Obtener la configuración completa y analizar puertos troncales
+                config_completa = connection.send_command("show running-config")
+                puertos_troncales = analizar_configuracion_para_troncales(config_completa)
+
+                mostrar_puertos()
+                break
+            else:
+                output.insert(tk.END, "Conexión no establecida, reintentando...\n")
+        except NetmikoTimeoutException:
+            output.insert(tk.END, "Tiempo de espera excedido, reintentando...\n")
+        except NetmikoAuthenticationException:
+            output.insert(tk.END, "Error de autenticación. Verifica usuario y contraseña.\n")
+            break
+        except Exception as e:
+            output.insert(tk.END, f"Error al conectar: {e}\n")
+        time.sleep(1)
+
+    if intento == 2:
+        output.insert(tk.END, "No se pudo establecer la conexión después de varios intentos.\n")
+
+def analizar_configuracion_para_troncales(configuracion):
+    puertos_troncales = []
+    lineas = configuracion.splitlines()
+    nombre_puerto_actual = None
+    for linea in lineas:
+        if linea.startswith('interface'):
+            nombre_puerto_actual = linea.split()[1]
+        elif 'switchport mode trunk' in linea and nombre_puerto_actual:
+            puertos_troncales.append(nombre_puerto_actual)
+            nombre_puerto_actual = None  # Reset para el siguiente puerto
+    return puertos_troncales
+
+def actualizar_password(event):
+    """Actualiza el campo de contraseña basado en el usuario seleccionado"""
+    user = combo_users.get()
+    if user in users:
+        entry_password.delete(0, tk.END)
+        entry_password.insert(0, users[user])     
+
+def agregar_usuario():
+    global users  # Es importante referenciar la variable global
+
+    user = combo_users.get()
+    password = entry_password.get()
+
+    if user and password:
+        # Guardar en el archivo de usuarios
+        users[user] = password  # Actualizamos el diccionario en memoria
+        with open(USERS_FILE, 'w') as file:
+            json.dump(users, file)  # Y luego guardamos ese diccionario en el archivo
+
+        combo_users['values'] = list(users.keys())
+        output.insert(tk.END, f"Usuario {user} agregado exitosamente\n")
+    else:
+        messagebox.showwarning("Advertencia", "Por favor, ingresa un usuario y contraseña")
+
+def mostrar_puertos():
+    global puerto_seleccionado, connection, ventana_puertos
+    global ventana_puertos, connection, unidad_seleccionada
+    print("Función mostrar_puertos invocada")
+
+    # Cierra la ventana de puertos si está abierta
+    if ventana_puertos:
+        print("Cerrando ventana existente")
+        ventana_puertos.destroy()
+        ventana_puertos = None
+        app.update()  # Procesa los eventos pendientes para asegurar que la ventana se cierra completamente
+
+    if connection:
+        ventana_puertos = tk.Toplevel()
+        ventana_puertos.title("Seleccionar Puertos")
+        ventana_puertos.geometry("450x800")
+
+        # Asegurar que la ventana principal se ha dibujado
+        app.update_idletasks()
+
+        # Posicionar al lado derecho de la ventana principal
+        x = app.winfo_x() + app.winfo_width()
+        y = app.winfo_y()
+        ventana_puertos.geometry(f"+{x}+{y}")
+
+        output.insert(tk.END, "Cargando puertos...\n")
+
+        thread = threading.Thread(target=procesar_puertos, args=(ventana_puertos,))
+        thread.start()
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+
+def procesar_puertos(ventana_puertos):
+    print("Procesando puertos...")
+    global connection
+    puertos = obtener_puertos()
+    ventana_puertos.after(0, lambda: crear_interfaz_puertos(ventana_puertos, puertos))
+
+def crear_interfaz_puertos(ventana_puertos, puertos):
+    print("Creando interfaz de puertos...") 
+    global estados_puertos, puertos_troncales
+
+    # Elimina estas líneas:
+    # if ventana_puertos:
+    #     ventana_puertos.destroy()
+    #
+    # ventana_puertos = tk.Toplevel()
+    # ventana_puertos.title("Seleccionar Puertos")
+    # ventana_puertos.geometry("450x700"))
+
+    container = ttk.Frame(ventana_puertos)
+    container.pack(fill="both", expand=True)
+
+
+    # Posicionar al lado derecho de la ventana principal
+    x = app.winfo_x() + app.winfo_width()
+    y = app.winfo_y()
+    ventana_puertos.geometry(f"+{x}+{y}")
+
+    # Crear canvas y scrollbar
+    canvas = tk.Canvas(container)
+    scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    scrollable_frame = ttk.Frame(canvas)
+
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    # Función para manejar el desplazamiento con la rueda del mouse
+    def on_mousewheel(event):
+        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+    # Enlazar el evento de la rueda del mouse con la función on_mousewheel
+    canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    estados_puertos = {}
+    for i, puerto in enumerate(puertos):
+        es_troncal = puerto in puertos_troncales
+        estado_puerto = tk.BooleanVar(value=False)
+        checkbox = tk.Checkbutton(
+            scrollable_frame, 
+            text=puerto, 
+            variable=estado_puerto, 
+            state='disabled' if es_troncal else 'normal',
+            command=lambda p=puerto, sp=estado_puerto: on_puerto_seleccionado(p, sp.get())  # Agrega el comando aquí
+        )
+        checkbox.grid(row=i, column=0, sticky="w")
+        estados_puertos[puerto] = estado_puerto
+
+    btn_frame = ttk.Frame(ventana_puertos)
+    btn_frame.pack(fill="x", expand=True)
+
+    btn_ver_config = ttk.Button(btn_frame, text="Ver Configuración", 
+                                command=lambda: ver_configuracion_puerto(estados_puertos))
+    btn_ver_config.pack(side="left", padx=10, pady=10)
+
+    btn_aplicar_seguridad = ttk.Button(btn_frame, text="Aplicar Configuración de Seguridad", 
+                                       command=lambda: aplicar_configuracion(estados_puertos))
+    btn_aplicar_seguridad.pack(side="left", padx=10, pady=10)
+
+    btn_reiniciar = ttk.Button(btn_frame, text="Reiniciar Puerto", 
+                               command=lambda: reiniciar_puerto(estados_puertos))
+    btn_reiniciar.pack(side="left", padx=10, pady=10)
+       
+def seleccionar_unidad():
+    global unidad_seleccionada, ventana_puertos
+    print("seleccionar_unidad llamado") 
+    es_pila = messagebox.askyesno("Pregunta", "¿Estás conectando a una pila de switches?", parent=app)
+
+    # Cierra la ventana de puertos si está abierta y establece ventana_puertos a None
+    if ventana_puertos:
+        print("Cerrando ventana de puertos desde seleccionar_unidad")
+        ventana_puertos.destroy()
+        ventana_puertos = None
+
+    if es_pila:
+        unidad_seleccionada = simpledialog.askinteger("Selección de Unidad", 
+                                                      "Ingresa el número de la unidad (1-5):", 
+                                                      parent=app, minvalue=1, maxvalue=5)
+
+        if unidad_seleccionada is not None:
+            mostrar_puertos()
+    else:
+        unidad_seleccionada = None
+        mostrar_puertos()
+
+def obtener_puertos():
+    print("Obteniendo puertos del switch...")
+    """Obtiene los puertos del switch seleccionado."""
+    if connection:
+        comando = "show ip interface brief"
+        salida = connection.send_command(comando)
+
+        puertos = []
+        for linea in salida.splitlines():
+            partes = linea.split()
+            # Asegurarse de que la línea contiene un nombre de interfaz válido y que no sea Vlan1
+            if len(partes) >= 2 and "Interface" not in partes[0] and "Vlan1" not in partes[0]:
+                if "GigabitEthernet" in partes[0] or "FastEthernet" in partes[0]:
+                    # Filtra según la unidad seleccionada en caso de pila
+                    if not unidad_seleccionada or f"GigabitEthernet{unidad_seleccionada}/" in partes[0]:
+                        puertos.append(partes[0])
+                    else:
+                        print(f"Puerto filtrado: {partes[0]}")  # Agregar esta línea para depuración
+        print(f"Lista de puertos obtenida: {puertos}")  # Agregar esta línea para depuración
+        return puertos
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+        return []
+
+def ver_configuracion_puerto(estados_puertos):
+    for puerto, estado in estados_puertos.items():
+        if estado.get():  # Si el checkbox está seleccionado
+            # Obtener la configuración actual del puerto
+            config_puerto = connection.send_command(f"show running-config interface {puerto}")
+            output.insert(tk.END, f"Configuración de {puerto}:\n{config_puerto}\n")
+
+            # Obtener y mostrar el estado actual del puerto (up/down)
+            estado_puerto_respuesta = connection.send_command(f"show interface {puerto}")
+            if "line protocol is up" in estado_puerto_respuesta.lower():
+                estado_linea = "Up"
+            elif "line protocol is down" in estado_puerto_respuesta.lower():
+                estado_linea = "Down"
+            else:
+                estado_linea = "Indeterminado"
+
+            label_estado_puerto.config(text=f"Estado del Puerto: {estado_linea}")
+
+            # Verificar si la seguridad del puerto está habilitada
+            if "switchport port-security" in config_puerto:
+                label_seguridad_puerto.config(text="Seguridad del Puerto: Habilitada")
+            else:
+                label_seguridad_puerto.config(text="Seguridad del Puerto: Deshabilitada")
+
+def aplicar_configuracion(estados_puertos):
+    print("Aplicando configuración...")
+    global connection
+    if connection:
+        puertos_seleccionados = [puerto for puerto, estado in estados_puertos.items() if estado.get()]
+
+        if puertos_seleccionados:
+            ventana_seguridad = tk.Toplevel()
+            ventana_seguridad.title(f"Configurar Seguridad - {', '.join(puertos_seleccionados)}")
+
+            aplicar_max_security = tk.BooleanVar()
+            check_max_security = tk.Checkbutton(ventana_seguridad, text="Aplicar switchport port-security maximum", variable=aplicar_max_security)
+            check_max_security.pack(padx=10, pady=5)
+
+            entry_max_security = tk.Entry(ventana_seguridad)
+            entry_max_security.pack(padx=10, pady=5)
+
+            btn_habilitar = tk.Button(ventana_seguridad, text="Habilitar", 
+                                      command=lambda: configurar_seguridad_puertos(puertos_seleccionados, True, aplicar_max_security.get(), entry_max_security.get()))
+            btn_habilitar.pack(padx=10, pady=5)
+
+            btn_deshabilitar = tk.Button(ventana_seguridad, text="Deshabilitar", 
+                                         command=lambda: configurar_seguridad_puertos(puertos_seleccionados, False))
+            btn_deshabilitar.pack(padx=10, pady=5)
+
+            ventana_seguridad.geometry("400x150")
+            centrar_ventana(ventana_seguridad, app)
+        else:
+            output.insert(tk.END, "Por favor, selecciona al menos un puerto.\n")
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+   
+def centrar_ventana(ventana, ventana_padre):
+    """ Centra la ventana dada respecto a la ventana padre. """
+    ventana.update_idletasks()
+    width = ventana.winfo_width()
+    height = ventana.winfo_height()
+    x = ventana_padre.winfo_x() + (ventana_padre.winfo_width() // 2) - (width // 2)
+    y = ventana_padre.winfo_y() + (ventana_padre.winfo_height() // 2) - (height // 2)
+    ventana.geometry('+{}+{}'.format(x, y))
+
+def configurar_seguridad_puertos(puertos, habilitar, aplicar_max_security=False, max_security_value=None):
+    global connection
+
+    if connection:
+        for puerto in puertos:
+            if habilitar:
+                comandos = [
+                    f"interface {puerto}",
+                    "switchport port-security",
+                    "switchport port-security mac-address sticky",
+                ]
+                if aplicar_max_security and max_security_value:
+                    comandos.append(f"switchport port-security maximum {max_security_value}")
+
+                comandos.extend(["shut", "no shut", "end", "wr"])
+            else:
+                comandos = [
+                    f"interface {puerto}",
+                    "no switchport port-security",
+                    "no switchport port-security mac-address sticky",
+                    "no switchport port-security maximum",
+                    "shut",
+                    "no shut",
+                    "end",
+                    "wr"
+                ]
+
+            connection.send_config_set(comandos)
+            output.insert(tk.END, f"Configuración aplicada en {puerto}\n")
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+
+def reiniciar_puerto(estados_puertos):
+    if connection:
+        for puerto, estado in estados_puertos.items():
+            if estado.get():
+                # Enviar comandos para reiniciar el puerto
+                comandos = [f"interface {puerto}", "shutdown", "no shutdown", "end"]
+                connection.send_config_set(comandos)
+
+                # Esperar un poco para que el puerto tenga tiempo de cambiar de estado
+                time.sleep(5)
+
+                # Comprobar el estado del puerto después del reinicio
+                estado_puerto_respuesta = connection.send_command(f"show interface {puerto}")
+                if "line protocol is up" in estado_puerto_respuesta.lower():
+                    output.insert(tk.END, f"Estado de {puerto} después del reinicio: Up\n")
+                elif "line protocol is down" in estado_puerto_respuesta.lower():
+                    output.insert(tk.END, f"Estado de {puerto} después del reinicio: Down\n")
+                else:
+                    output.insert(tk.END, f"Estado de {puerto} después del reinicio: Indeterminado\n")
+                break
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+
+def conectar_con_enter(event):
+    conectar()
+
+def normalizar_mac(mac_address):
+    # Elimina todos los separadores no deseados y convierte a minúsculas
+    mac_address = mac_address.replace('-', '').replace(':', '').replace('.', '').lower()
+    # Reinserta puntos para obtener el formato esperado por el switch (XXXX.XXXX.XXXX)
+    return '.'.join([mac_address[i:i+4] for i in range(0, 12, 4)])
+
+def buscar_mac():
+    print("Buscando dirección MAC...")
+    global connection
+    if connection:
+        # Invocar diálogo de búsqueda MAC centrado en la ventana principal
+        raw_mac_address = simpledialog.askstring("Buscar MAC", "Ingresa la dirección MAC:", parent=app)
+        if raw_mac_address:
+            mac_address = normalizar_mac(raw_mac_address)
+            comando = f"show mac address-table | include {mac_address}"
+            salida = connection.send_command(comando)
+            puerto = extraer_puerto_de_mac(salida)  # Asegúrate de que esta función retorne el puerto correcto
+            if puerto:
+                output.insert(tk.END, f"Resultado para {mac_address}:\n{salida}\n")
+                verificar_tipo_puerto(puerto, mac_address)  # Función para verificar el tipo de puerto
+            else:
+                output.insert(tk.END, f"No se encontró la dirección MAC {mac_address}.\n")
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+
+def verificar_tipo_puerto(puerto, mac_address):
+    print(f"Verificando tipo de puerto para MAC {mac_address}...")
+    global connection
+    if connection:
+        # Obtener la configuración actual del puerto
+        config_puerto = connection.send_command(f"show run interface {puerto}")
+        output.insert(tk.END, f"Configuración de {puerto}:\n{config_puerto}\n")
+
+        # Verificar si el puerto es trunk y luego obtener detalles del CDP si es necesario
+        if "switchport mode trunk" in config_puerto:
+            cdp_info = connection.send_command(f"show cdp neighbors {puerto} detail", use_textfsm=True)
+            for neighbor in cdp_info:
+                # Asegúrate de que la información de TextFSM devuelva la estructura adecuada
+                if neighbor['local_interface'] == puerto:
+                    id_switch_vecino = neighbor['destination_host']
+                    puerto_vecino = neighbor['port_id']
+                    output.insert(tk.END, f"El puerto {puerto} es un trunk, conectado al switch {id_switch_vecino} puerto {puerto_vecino}\n")
+                    break
+            else:
+                output.insert(tk.END, f"No se pudo determinar el switch vecino para el puerto trunk {puerto}\n")
+        else:
+            # Puerto de acceso
+            output.insert(tk.END, f"La MAC {mac_address} está en el puerto de acceso {puerto}.\n")
+
+def extraer_info_switch_vecino(detalles_vecino):
+    # Ajusta estas expresiones regulares según la salida de tu comando
+    match_device = re.search(r'Device ID: (.+)', detalles_vecino)
+    match_port = re.search(r'Port ID \(outgoing port\): (.+)', detalles_vecino)
+    id_switch_vecino = match_device.group(1) if match_device else None
+    puerto_vecino = match_port.group(1) if match_port else None
+    return id_switch_vecino, puerto_vecino
+
+# Asegúrate de que esta función esté actualizada para que coincida con la salida de tu switch
+def extraer_puerto_de_mac(salida):
+    # Esta función ahora puede manejar tanto FastEthernet como GigabitEthernet.
+    match = re.search(r'(Fa|Gi)(\d+/\d+/\d+|\d+/\d+)', salida)
+    if match:
+        tipo = "FastEthernet" if match.group(1) == 'Fa' else "GigabitEthernet"
+        return f"{tipo}{match.group(2)}"
+    else:
+        return None
+
+# Asegúrate de que la ventana de búsqueda de MAC aparezca centrada en la ventana principal
+def centrar_ventana_sobre_parent(ventana, parent):
+    parent.update_idletasks()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    px = parent.winfo_rootx()
+    py = parent.winfo_rooty()
+    w = ventana.winfo_width()
+    h = ventana.winfo_height()
+    ventana.geometry("+%d+%d" % (px + (pw-w)/2, py + (ph-h)/2))
+
+def extraer_id_switch_vecino(detalles_vecino):
+    # Ajusta esta expresión regular según la salida de tu comando
+    match = re.search(r'Device ID: (.+)', detalles_vecino)
+    return match.group(1) if match else None
+
+# Llama a esta función para centrar la ventana de búsqueda de MAC
+def mostrar_ventana_buscar_mac():
+    ventana_buscar_mac = simpledialog.askstring("Buscar MAC", "Ingresa la dirección MAC:", parent=app)
+    centrar_ventana_sobre_parent(ventana_buscar_mac, app)
+    return ventana_buscar_mac
+  
+
+
+
+# Configuracion de VLAN
+
+
+def mostrar_vlans():
+    global connection
+    if connection:
+        try:
+            vlans_output = connection.send_command("show vlan brief")
+            vlans_output = formatear_salida_vlans(vlans_output)  # Asegúrate de definir esta función
+            output_vlans.config(state='normal')  # Habilita la edición para insertar texto
+            output_vlans.delete('1.0', tk.END)  # Limpia la salida anterior
+            output_vlans.insert(tk.END, vlans_output)  # Inserta la salida formateada
+            output_vlans.config(state='disabled')  # Deshabilita la edición para evitar cambios
+            print("VLANs mostradas en la interfaz.")  # Mensaje de depuración
+        except Exception as e:
+            print(f"Error al obtener las VLANs: {e}")  # Mensaje de error en caso de excepción
+
+
+def formatear_salida_vlans(vlans_output):
+    # Aquí puedes agregar el código para formatear la salida de manera que sea más legible
+    # Esto dependerá del formato exacto de la salida de tu comando
+    # A continuación, te doy un ejemplo genérico:
+    lineas = vlans_output.splitlines()
+    lineas_formateadas = []
+    for linea in lineas:
+        # Aquí agregarías la lógica para formatear cada línea
+        # Por ejemplo, podrías usar .split() y luego volver a unir los elementos con .join()
+        # o podrías utilizar expresiones regulares para extraer y reorganizar la información
+        partes = linea.split()
+        linea_formateada = ' '.join(partes)
+        lineas_formateadas.append(linea_formateada)
+    return '\n'.join(lineas_formateadas)
+
+
+
+
+
+def cambiar_vlan_puerto():
+    global puerto_seleccionado, connection
+    print(f"Inicio del cambio de VLAN para el puerto: {puerto_seleccionado}")
+    if puerto_seleccionado and connection:
+        vlan_nueva = simpledialog.askstring("Cambiar VLAN", f"Ingresa el número de VLAN para el puerto {puerto_seleccionado}",
+                                            parent=app)
+        descripcion = simpledialog.askstring("Descripción", "Ingresa una descripción (opcional):", parent=app)
+        if vlan_nueva:
+            try:
+                comandos_vlan = [
+                    f"interface {puerto_seleccionado}",
+                    f"switchport access vlan {vlan_nueva}"
+                ]
+                if descripcion:
+                    comandos_vlan.append(f"description {descripcion}")
+                
+                comandos_vlan.append("end")
+                
+                print(f"Enviando comandos al dispositivo: {comandos_vlan}")
+                connection.send_config_set(comandos_vlan)
+                connection.send_command(f"interface {puerto_seleccionado}", expect_string=r"#")
+                connection.send_command("shutdown", expect_string=r"#")
+                time.sleep(2)
+                connection.send_command("no shutdown", expect_string=r"#")
+                connection.send_command("end", expect_string=r"#")
+                
+                messagebox.showinfo("Éxito", f"La VLAN del puerto {puerto_seleccionado} ha sido cambiada a {vlan_nueva}.\n"
+                                              f"Descripción: '{descripcion}' (si se proporcionó).")
+                print(f"Cambio de VLAN exitoso en el puerto: {puerto_seleccionado}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error al cambiar la VLAN: {e}")
+                print(f"Error al cambiar VLAN en el puerto: {puerto_seleccionado}, {e}")
+        else:
+            messagebox.showinfo("Cancelado", "Cambio de VLAN cancelado.")
+            print(f"Cambio de VLAN cancelado por el usuario para el puerto: {puerto_seleccionado}")
+    else:
+        messagebox.showwarning("Advertencia", "Por favor, selecciona un puerto y conéctate a un dispositivo.")
+        print(f"Advertencia: Puerto no seleccionado o conexión no establecida.")
+
+
+
+
+# Esta función debería ser llamada cada vez que un puerto es seleccionado o deseleccionado
+def actualizar_puerto_seleccionado(puerto, es_seleccionado):
+    global puerto_seleccionado
+    if es_seleccionado:
+        puerto_seleccionado = puerto
+    else:
+        puerto_seleccionado = None
+
+def on_puerto_seleccionado(puerto, seleccionado):
+    global puerto_seleccionado
+    if seleccionado:
+        puerto_seleccionado = puerto
+        print(f"Puerto seleccionado: {puerto_seleccionado}")
+    else:
+        if puerto_seleccionado == puerto:
+            puerto_seleccionado = None
+        print(f"Puerto deseleccionado: {puerto}")
+
+
+
+
+
+
+
+
+
+
+
+class AutoScrollingScrolledText(scrolledtext.ScrolledText):
+    def insert(self, index, text):
+        super().insert(index, text)
+        self.see(tk.END)  # Desplazarse automáticamente hacia abajo
+
+
+app = tk.Tk()
+app.title("Puerto de Seguridad by Jose Roberto Medina")
+app.geometry("1000x800")  # Definir un tamaño inicial más grande
+app.grid_rowconfigure(2, weight=1)  # Hacer que la fila 2 (output) se expanda
+app.grid_columnconfigure(0, weight=1)  # Hacer que la columna 0 se expanda
+
+frame = ttk.LabelFrame(app, text="Conexión")
+frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew", columnspan=2)
+
+label_ip = ttk.Label(frame, text="IP:")
+label_ip.grid(row=0, column=0, sticky="w")
+entry_ip = ttk.Entry(frame)
+entry_ip.grid(row=0, column=1, sticky="ew")
+
+label_user = ttk.Label(frame, text="Usuario:")
+label_user.grid(row=1, column=0, sticky="w")
+combo_users = ttk.Combobox(frame, values=list(users.keys()))
+combo_users.grid(row=1, column=1, sticky="ew")
+# combo_users.set("Otro")
+combo_users.bind("<<ComboboxSelected>>", actualizar_password)
+
+label_password = ttk.Label(frame, text="Contraseña:")
+label_password.grid(row=2, column=0, sticky="w")
+entry_password = ttk.Entry(frame, show="*")
+entry_password.grid(row=2, column=1, sticky="ew")
+
+btn_conectar = ttk.Button(frame, text="Conectar", command=conectar_en_hilo)
+btn_conectar.grid(row=3, column=1, pady=10, sticky="ew")
+app.bind('<Return>', conectar_con_enter)
+
+# Después de definir tus elementos de entrada en el frame principal
+label_estado_puerto = ttk.Label(frame, text="Estado del Puerto: -")
+label_estado_puerto.grid(row=4, column=0, columnspan=2, sticky="w")
+
+label_seguridad_puerto = ttk.Label(frame, text="Seguridad del Puerto: -")
+label_seguridad_puerto.grid(row=5, column=0, columnspan=2, sticky="w")
+
+# Luego, crea el objeto output con esta nueva clase
+output = AutoScrollingScrolledText(app, wrap=tk.WORD, width=80, height=30, bg='black', fg='#00FF00')
+output.grid(row=2, column=0, padx=10, pady=10, sticky="nsew", columnspan=2)
+
+# Agrega un botón para seleccionar la unidad
+btn_seleccionar_unidad = ttk.Button(frame, text="Seleccionar Unidad", command=seleccionar_unidad)
+btn_seleccionar_unidad.grid(row=6, column=0, columnspan=2, pady=10, sticky="ew")
+
+btn_buscar_mac = ttk.Button(frame, text="Buscar MAC", command=buscar_mac)
+btn_buscar_mac.grid(row=7, column=0, columnspan=2, pady=10, sticky="ew")
+
+
+# Definir un nuevo frame para el output y output_vlans
+output_frame = ttk.Frame(app)
+output_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+app.grid_rowconfigure(2, weight=1)
+app.grid_columnconfigure(0, weight=1)
+
+# Colocar el output en el output_frame
+output = AutoScrollingScrolledText(output_frame, wrap=tk.WORD, width=80, height=30, bg='black', fg='#00FF00')
+output.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=10)
+output_frame.grid_rowconfigure(0, weight=1)
+output_frame.grid_columnconfigure(0, weight=3)  # output ocupará más espacio
+
+# Colocar el output_vlans en el output_frame
+output_vlans = tk.Text(output_frame, height=30, width=50, wrap='none')
+output_vlans_scrollbar = tk.Scrollbar(output_frame, orient="vertical", command=output_vlans.yview)
+output_vlans.config(yscrollcommand=output_vlans_scrollbar.set)
+
+output_vlans.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=10)
+output_vlans_scrollbar.grid(row=0, column=2, sticky='nsew')
+
+output_frame.grid_columnconfigure(1, weight=1)  # output_vlans ocupará menos espacio que output
+
+
+# Botón para cambiar VLAN ahora llama a la función cambiar_configuracion_vlan_puerto
+btn_cambiar_vlan = ttk.Button(frame, text="Cambiar VLAN del Puerto Seleccionado", command=cambiar_vlan_puerto)
+btn_cambiar_vlan.grid(row=9, column=0, columnspan=2, pady=10, sticky="ew")
+
+
+
+
+
+
+
+
+
+
+
+logo_seguridad_ascii = """
+███████╗███████╗ ██████╗ ██╗   ██╗██████╗ ██╗██████╗  █████╗ ██████╗ 
+██╔════╝██╔════╝██╔════╝ ██║   ██║██╔══██╗██║██╔══██╗██╔══██╗██╔══██╗
+███████╗█████╗  ██║  ███╗██║   ██║██████╔╝██║██║  ██║███████║██║  ██║
+╚════██║██╔══╝  ██║   ██║██║   ██║██╔══██╗██║██║  ██║██╔══██║██║  ██║
+███████║███████╗╚██████╔╝╚██████╔╝██║  ██║██║██████╔╝██║  ██║██████╔╝
+╚══════╝╚══════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝ ╚═╝  ╚═╝╚═════╝                                                                    
+Bienvenido al Sistema de Configuración de Puertos de Seguridad
+"""
+# En tu código, después de crear el área de texto output:
+output.insert(tk.END, logo_seguridad_ascii)
+
+app.mainloop()
+
+
+
+
+
+
