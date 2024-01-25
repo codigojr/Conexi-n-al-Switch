@@ -57,16 +57,16 @@ def conectar():
     if connection:
         connection.disconnect()
         connection = None
+        print("Desconectado de la sesión anterior.")
 
     output.delete('1.0', tk.END)
     output.insert(tk.END, logo_seguridad_ascii) 
-    
-
 
     # Cierra la ventana de puertos si está abierta y establece ventana_puertos a None
     if ventana_puertos:
         ventana_puertos.destroy()
         ventana_puertos = None
+        print("Ventana de puertos cerrada.")
 
     ip = entry_ip.get()
     user = combo_users.get()
@@ -74,34 +74,29 @@ def conectar():
 
     if not ip or not user or not password:
         messagebox.showwarning("Advertencia", "Por favor, llena todos los campos.")
+        print("Advertencia: Campos incompletos.")
         return
 
     device = {
-    'device_type': 'cisco_ios',
-    'ip': ip,
-    'username': user,
-    'password': password,
-    'conn_timeout': 20,  # Aumenta el tiempo de conexión
-    'global_delay_factor': 4  # Aumenta si el dispositivo es lento en responder
-}
-
-
-
+        'device_type': 'cisco_ios',
+        'ip': ip,
+        'username': user,
+        'password': password,
+        'conn_timeout': 20,
+        'global_delay_factor': 4
+    }
 
     output.insert(tk.END, "Intentando conectar, por favor espere...\n")
     print("Iniciando proceso de conexión...")
-    for intento in range(3):  # Intenta conectar hasta 3 veces
+    for intento in range(3):
         try:
             connection = ConnectHandler(**device)
             if connection.is_alive():
                 output.insert(tk.END, f"Conectado exitosamente a {ip}\n")
                 print(f"Conexión exitosa a {ip}")
 
-                # Llamar a mostrar_vlans aquí para cargar y mostrar la información de VLANs
                 mostrar_vlans()
 
-
-                # Verificar si es una pila
                 config = connection.send_command("show running-config | include switch [0-9] provision")
                 es_pila = len(config.splitlines()) > 1
                 if es_pila:
@@ -111,7 +106,6 @@ def conectar():
                 else:
                     unidad_seleccionada = None
 
-                # Obtener la configuración completa y analizar puertos troncales
                 config_completa = connection.send_command("show running-config")
                 puertos_troncales = analizar_configuracion_para_troncales(config_completa)
 
@@ -119,17 +113,22 @@ def conectar():
                 break
             else:
                 output.insert(tk.END, "Conexión no establecida, reintentando...\n")
+                print("Conexión no establecida, intentando de nuevo.")
         except NetmikoTimeoutException:
             output.insert(tk.END, "Tiempo de espera excedido, reintentando...\n")
+            print("Tiempo de espera excedido, intentando de nuevo.")
         except NetmikoAuthenticationException:
             output.insert(tk.END, "Error de autenticación. Verifica usuario y contraseña.\n")
+            print("Error de autenticación.")
             break
         except Exception as e:
             output.insert(tk.END, f"Error al conectar: {e}\n")
+            print(f"Error al conectar: {e}")
         time.sleep(1)
 
     if intento == 2:
         output.insert(tk.END, "No se pudo establecer la conexión después de varios intentos.\n")
+        print("No se pudo establecer la conexión después de varios intentos.")
 
 def analizar_configuracion_para_troncales(configuracion):
     puertos_troncales = []
@@ -141,7 +140,8 @@ def analizar_configuracion_para_troncales(configuracion):
         elif 'switchport mode trunk' in linea and nombre_puerto_actual:
             puertos_troncales.append(nombre_puerto_actual)
             nombre_puerto_actual = None  # Reset para el siguiente puerto
-            print("Puertos troncales encontrados:", puertos_troncales)
+
+    print("Puertos troncales encontrados:", puertos_troncales)
     return puertos_troncales
 
 def actualizar_password(event):
@@ -330,7 +330,6 @@ def ver_configuracion_puerto(estados_puertos):
         if estado.get():  # Si el checkbox está seleccionado
             # Obtener la configuración actual del puerto
             config_puerto = connection.send_command(f"show running-config interface {puerto}")
-            print(f"Configuración de {puerto}:\n{config_puerto}\n")  # Imprimir configuración del puerto
             output.insert(tk.END, f"Configuración de {puerto}:\n{config_puerto}\n")
 
             # Obtener y mostrar el estado actual del puerto (up/down)
@@ -342,17 +341,27 @@ def ver_configuracion_puerto(estados_puertos):
             else:
                 estado_linea = "Indeterminado"
 
-            print(f"Estado del Puerto {puerto}: {estado_linea}")  # Imprimir estado del puerto
+            output.insert(tk.END, f"Estado del Puerto {puerto}: {estado_linea}\n")
             label_estado_puerto.config(text=f"Estado del Puerto: {estado_linea}")
 
             # Verificar si la seguridad del puerto está habilitada
             if "switchport port-security" in config_puerto:
                 label_seguridad_puerto.config(text="Seguridad del Puerto: Habilitada")
-                print("Seguridad del Puerto: Habilitada")  # Imprimir estado de seguridad del puerto
             else:
                 label_seguridad_puerto.config(text="Seguridad del Puerto: Deshabilitada")
-                print("Seguridad del Puerto: Deshabilitada")  # Imprimir estado de seguridad del puerto
 
+            # Preguntar al usuario si desea ver la información de IP device tracking
+            mostrar_ips = messagebox.askyesno("Mostrar IPs", "¿Deseas ver las direcciones IP rastreadas para este puerto?")
+            if mostrar_ips:
+                # Obtener la dirección IP del dispositivo rastreado para la interfaz
+                device_tracking_respuesta = connection.send_command(f"show ip device tracking interface {puerto}")
+                ip_addresses = re.findall(r'(\d+\.\d+\.\d+\.\d+)', device_tracking_respuesta)
+
+                if ip_addresses:
+                    ip_list = '\n'.join(ip_addresses)
+                    output.insert(tk.END, f"IP Device Tracking para {puerto}:\n{ip_list}\n")
+                else:
+                    output.insert(tk.END, f"No se encontraron direcciones IP de Device Tracking para {puerto}.\n")
 
 def aplicar_configuracion(estados_puertos):
     print("Aplicando configuración...")
@@ -410,6 +419,7 @@ def configurar_seguridad_puertos(puertos, habilitar, aplicar_max_security=False,
                     comandos.append(f"switchport port-security maximum {max_security_value}")
 
                 comandos.extend(["shut", "no shut", "end", "wr"])
+                print(f"Habilitando seguridad en {puerto} con los comandos:\n" + "\n".join(comandos))
             else:
                 comandos = [
                     f"interface {puerto}",
@@ -421,18 +431,28 @@ def configurar_seguridad_puertos(puertos, habilitar, aplicar_max_security=False,
                     "end",
                     "wr"
                 ]
-            print(f"Aplicando configuración en {puerto}:\n" + "\n".join(comandos))
+                print(f"Deshabilitando seguridad en {puerto} y limpiando MAC con los comandos:\n" + "\n".join(comandos))
+            
             connection.send_config_set(comandos)
             output.insert(tk.END, f"Configuración aplicada en {puerto}\n")
     else:
         output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+        print("Por favor, conecta primero al dispositivo.")
 
 def reiniciar_puerto(estados_puertos):
     if connection:
         for puerto, estado in estados_puertos.items():
             if estado.get():
-                # Enviar comandos para reiniciar el puerto
-                comandos = [f"interface {puerto}", "shutdown", "no shutdown", "end"]
+                # Enviar comandos para reiniciar el puerto, limpiar seguridad y direcciones MAC
+                comandos = [
+                    f"interface {puerto}",
+                    "shutdown",
+                    "no shutdown",
+                    "end",
+                    f"clear port-security sticky interface {puerto}",  # Limpia la configuración de seguridad del puerto
+                    f"clear mac address-table dynamic interface {puerto}"  # Limpia las direcciones MAC dinámicas
+                ]
+                print(f"Reiniciando y limpiando seguridad y MAC en {puerto} con los comandos:\n" + "\n".join(comandos))
                 connection.send_config_set(comandos)
 
                 # Esperar un poco para que el puerto tenga tiempo de cambiar de estado
@@ -442,16 +462,22 @@ def reiniciar_puerto(estados_puertos):
                 estado_puerto_respuesta = connection.send_command(f"show interface {puerto}")
                 if "line protocol is up" in estado_puerto_respuesta.lower():
                     output.insert(tk.END, f"Estado de {puerto} después del reinicio: Up\n")
+                    print(f"Estado de {puerto} después del reinicio: Up")
                 elif "line protocol is down" in estado_puerto_respuesta.lower():
                     output.insert(tk.END, f"Estado de {puerto} después del reinicio: Down\n")
+                    print(f"Estado de {puerto} después del reinicio: Down")
                 else:
                     output.insert(tk.END, f"Estado de {puerto} después del reinicio: Indeterminado\n")
+                    print(f"Estado de {puerto} después del reinicio: Indeterminado")
                 break
     else:
         output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+        print("Por favor, conecta primero al dispositivo.")
+
 
 def conectar_con_enter(event):
     conectar()
+
 
 # Buscardor de MAC en los puertos y sus vecionos
 
@@ -482,27 +508,33 @@ def buscar_mac():
 
 def verificar_tipo_puerto(puerto, mac_address):
     print(f"Verificando tipo de puerto para MAC {mac_address}...")
-    global connection
+    global connection, output
     if connection:
         # Obtener la configuración actual del puerto
         config_puerto = connection.send_command(f"show run interface {puerto}")
         output.insert(tk.END, f"Configuración de {puerto}:\n{config_puerto}\n")
 
-        # Verificar si el puerto es trunk y luego obtener detalles del CDP si es necesario
+        # Verificar si el puerto es trunk y luego obtener la información de CDP
         if "switchport mode trunk" in config_puerto:
-            cdp_info = connection.send_command(f"show cdp neighbors {puerto} detail", use_textfsm=True)
-            for neighbor in cdp_info:
-                # Asegúrate de que la información de TextFSM devuelva la estructura adecuada
-                if neighbor['local_interface'] == puerto:
-                    id_switch_vecino = neighbor['destination_host']
-                    puerto_vecino = neighbor['port_id']
-                    output.insert(tk.END, f"El puerto {puerto} es un trunk, conectado al switch {id_switch_vecino} puerto {puerto_vecino}\n")
-                    break
+            cdp_info_detail = connection.send_command(f"show cdp neighbors {puerto} detail")
+            # Buscar el nombre del dispositivo y la dirección IP en la salida del comando CDP
+            device_id_match = re.search(r"Device ID: (.+)", cdp_info_detail)
+            ip_address_match = re.search(r"IP address: (.+)", cdp_info_detail)
+            
+            if device_id_match and ip_address_match:
+                device_id = device_id_match.group(1)
+                ip_address = ip_address_match.group(1)
+                output.insert(tk.END, f"El puerto {puerto} está conectado al dispositivo {device_id} con IP {ip_address}\n")
             else:
-                output.insert(tk.END, f"No se pudo determinar el switch vecino para el puerto trunk {puerto}\n")
+                output.insert(tk.END, f"No se pudo obtener información detallada del CDP para el puerto {puerto}\n")
         else:
             # Puerto de acceso
             output.insert(tk.END, f"La MAC {mac_address} está en el puerto de acceso {puerto}.\n")
+    else:
+        output.insert(tk.END, "Por favor, conecta primero al dispositivo.\n")
+
+
+
 
 def extraer_info_switch_vecino(detalles_vecino):
     # Ajusta estas expresiones regulares según la salida de tu comando
@@ -547,7 +579,6 @@ def mostrar_ventana_buscar_mac():
 
 # Configuracion de VLAN
 
-
 def mostrar_vlans():
     global connection
     if connection:
@@ -581,20 +612,25 @@ def cambiar_vlan_puerto():
     global puerto_seleccionado, connection
     print(f"Inicio del cambio de VLAN para el puerto: {puerto_seleccionado}")
     if puerto_seleccionado and connection:
-        vlan_nueva = simpledialog.askstring("Cambiar VLAN", f"Ingresa el número de VLAN para el puerto {puerto_seleccionado}",
-                                            parent=app)
+        vlan_datos_nueva = simpledialog.askstring("Cambiar VLAN de Datos", f"Ingresa el número de VLAN de datos para el puerto {puerto_seleccionado}", parent=app)
+        vlan_voz_nueva = simpledialog.askstring("Cambiar VLAN de Voz", f"Ingresa el número de VLAN de voz (opcional) para el puerto {puerto_seleccionado}", parent=app)
         descripcion = simpledialog.askstring("Descripción", "Ingresa una descripción (opcional):", parent=app)
-        if vlan_nueva:
+
+        if vlan_datos_nueva:
             try:
                 comandos_vlan = [
                     f"interface {puerto_seleccionado}",
-                    f"switchport access vlan {vlan_nueva}"
+                    f"switchport access vlan {vlan_datos_nueva}"
                 ]
+
+                if vlan_voz_nueva:
+                    comandos_vlan.append(f"switchport voice vlan {vlan_voz_nueva}")
+
                 if descripcion:
                     comandos_vlan.append(f"description {descripcion}")
-                
+
                 comandos_vlan.append("end")
-                
+
                 print(f"Enviando comandos al dispositivo: {comandos_vlan}")
                 connection.send_config_set(comandos_vlan)
                 connection.send_command(f"interface {puerto_seleccionado}", expect_string=r"#")
@@ -602,9 +638,10 @@ def cambiar_vlan_puerto():
                 time.sleep(2)
                 connection.send_command("no shutdown", expect_string=r"#")
                 connection.send_command("end", expect_string=r"#")
-                
-                messagebox.showinfo("Éxito", f"La VLAN del puerto {puerto_seleccionado} ha sido cambiada a {vlan_nueva}.\n"
-                                              f"Descripción: '{descripcion}' (si se proporcionó).")
+
+                messagebox.showinfo("Éxito", f"La VLAN de datos del puerto {puerto_seleccionado} ha sido cambiada a {vlan_datos_nueva}.\n" +
+                                             (f"La VLAN de voz ha sido configurada a {vlan_voz_nueva}.\n" if vlan_voz_nueva else "") +
+                                             f"Descripción: '{descripcion}' (si se proporcionó).")
                 print(f"Cambio de VLAN exitoso en el puerto: {puerto_seleccionado}")
             except Exception as e:
                 messagebox.showerror("Error", f"Error al cambiar la VLAN: {e}")
@@ -615,6 +652,8 @@ def cambiar_vlan_puerto():
     else:
         messagebox.showwarning("Advertencia", "Por favor, selecciona un puerto y conéctate a un dispositivo.")
         print(f"Advertencia: Puerto no seleccionado o conexión no establecida.")
+
+
 
 # Esta función debería ser llamada cada vez que un puerto es seleccionado o deseleccionado
 def actualizar_puerto_seleccionado(puerto, es_seleccionado):
@@ -633,14 +672,6 @@ def on_puerto_seleccionado(puerto, seleccionado):
         if puerto_seleccionado == puerto:
             puerto_seleccionado = None
         print(f"Puerto deseleccionado: {puerto}")
-
-
-
-
-
-
-
-
 
 
 
@@ -721,19 +752,9 @@ output_vlans_scrollbar.grid(row=0, column=2, sticky='nsew')
 
 output_frame.grid_columnconfigure(1, weight=1)  # output_vlans ocupará menos espacio que output
 
-
 # Botón para cambiar VLAN ahora llama a la función cambiar_configuracion_vlan_puerto
 btn_cambiar_vlan = ttk.Button(frame, text="Cambiar VLAN del Puerto Seleccionado", command=cambiar_vlan_puerto)
 btn_cambiar_vlan.grid(row=9, column=0, columnspan=2, pady=10, sticky="ew")
-
-
-
-
-
-
-
-
-
 
 
 logo_seguridad_ascii = """
